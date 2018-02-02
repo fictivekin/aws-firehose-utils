@@ -172,7 +172,7 @@ def get_failure_report(bucket, key):
 
 
 @manager.command
-def resubmit_to_es(stream, year, month, day):
+def resubmit_to_es(stream, year, month=None, day=None):
     """
     Resubmit a day of failed records to ElasticSearch
     """
@@ -189,7 +189,13 @@ def resubmit_to_es(stream, year, month, day):
     if s3_info['prefix'].endswith('/'):
         s3_info['prefix'] = s3_info['prefix'][:-1]
 
-    prefix = '{}/elasticsearch-failed/{}/{}/{}'.format(s3_info['prefix'], year, month, day)
+    prefix = '{}/elasticsearch-failed/{}'.format(s3_info['prefix'], year)
+    if month:
+        prefix = '{}/{}'.format(prefix, month)
+
+        if day:
+            prefix = '{}/{}'.format(prefix, day)
+
     print('Prefix: {}'.format(prefix))
 
     bucket = boto_session.resource('s3').Bucket(s3_info['bucket'])
@@ -228,24 +234,20 @@ def _resubmit_to_es(bucket, key, stream_config):
             exception_message = failures['rawData'].get('response', {}).get('exception', {}).get('message', {})
             if exception_message and isinstance(exception_message, dict):
 
-                print('Checking response.exception.message')
                 for keyname in exception_message.keys():
                     if isinstance(exception_message[keyname], list) and len(exception_message[keyname]) == 1:
-                        print('Found {}'.format(keyname))
                         failures['rawData']['response']['exception']['message'] = exception_message[keyname][0]
 
                     elif isinstance(exception_message[keyname], dict):
                         for subkeyname in exception_message[keyname].keys():
                             if isinstance(exception_message[keyname][subkeyname], list) and len(exception_message[keyname][subkeyname]) == 1:
-                                print('Found {}:{}'.format(keyname, subkeyname))
                                 failures['rawData']['response']['exception']['message'] = exception_message[keyname][subkeyname][0]
                             elif isinstance(exception_message[keyname][subkeyname], str):
-                                print('Found {}:{}'.format(keyname, subkeyname))
                                 failures['rawData']['response']['exception']['message'] = exception_message[keyname][subkeyname]
                     elif isinstance(exception_message[keyname], str):
-                        print('Found {}'.format(keyname))
                         failures['rawData']['response']['exception']['message'] = exception_message[keyname]
 
+            print('Resubmitting document id: {}'.format(failures['esDocumentId']))
             response = es_conn.create(
                 index=failures['esIndexName'],
                 doc_type=failures['esTypeName'],
