@@ -1,0 +1,4 @@
+aws-requests-auth==0.4.1
+boto3==1.5.22
+elasticsearch==5.5.0
+manage.py==0.2.10
