@@ -201,7 +201,9 @@ def resubmit_to_es(stream, year, month=None, day=None):
     bucket = boto_session.resource('s3').Bucket(s3_info['bucket'])
     bucketlist = bucket.objects.filter(Prefix=prefix)
 
-    for subobj in sorted(bucketlist, key=lambda k: k.last_modified):
+    # Get list in reverse, because typically when processing a full month, we
+    # want the most recent entries populated fastest
+    for subobj in sorted(bucketlist, key=lambda k: k.last_modified, reverse=True):
         print('Attempting to resubmit: {}'.format(subobj.key))
         _resubmit_to_es(s3_info['bucket'], subobj.key, stream_config)
 
