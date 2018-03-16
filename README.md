@@ -7,5 +7,5 @@ It also corrects a recurring error that we have with response.exception.message 
 
 To run:
 - source your creds and create the virtual environment
-- `python ./manage resubmit_to_es bifrost-<stage> <year> <month> <date>` (month and date must be zero padded when <10)
+- `python ./manage resubmit_to_es <stream> <year> [--month <month> [--day <date>]]` (month and date must be zero padded when <10)
 - Sit back and have a beer while it runs.
