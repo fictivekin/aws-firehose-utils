@@ -92,15 +92,66 @@ def get_s3info_from_config(config):
 
 
 @manager.command
-def review(stream=None, pattern=None):
+def review(stream, pattern=None, year=None, month=None, day=None):
     """
     Review the list of failures from a Kinesis Firehose Stream
     """
 
     stream_config = get_firehose_config(stream)
 
-    buckets = []
+    buckets = _extract_s3_info(stream_config)
 
+    if len(buckets) < 1:
+        print('Nothing to review, no stream destinations have S3 backups enabled.')
+        sys.exit(1)
+
+    elif len(buckets) > 1:
+        print('WARNING: Review is possible, but cannot resubmit to firehose for delivery since there are multiple destinations defined on the stream.')
+        print('Some destinations may have already accepted the records.')
+
+    for destination in buckets:
+        print('Keys in {}'.format(destination['bucket']))
+
+        prefix = _build_prefix(destination, year=year, month=month, day=day)
+
+        print('Prefix: {}'.format(prefix))
+        bucket = boto_session.resource('s3').Bucket(destination['bucket'])
+        bucketlist = bucket.objects.filter(Prefix=prefix)
+        for subobj in sorted(bucketlist, key=lambda k: k.last_modified):
+            display_key = subobj.key.replace(prefix, '')
+            if pattern:
+                if subobj.key.contains(pattern):
+                    print('  {}'.format(display_key))
+            else:
+                print('  {}'.format(display_key))
+
+
+def _build_prefix(s3_destination, year=None, month=None, day=None):
+    prefix = s3_destination['prefix']
+    if year:
+        if prefix.endswith('/'):
+            prefix = prefix[:-1]
+
+        prefix = '{}/elasticsearch-failed/{}'.format(prefix, year)
+        if month:
+            if int(month) < 10:
+                month = '0{}'.format(int(month))
+
+            prefix = '{}/{}'.format(prefix, month)
+
+            if day:
+                if int(day) < 10:
+                    day = '0{}'.format(int(day))
+
+                prefix = '{}/{}'.format(prefix, day)
+
+        prefix = '{}/'.format(prefix)
+
+    return prefix
+
+
+def _extract_s3_info(stream_config, es_only=False):
+    buckets = []
     for destination in stream_config['Destinations']:
         if 'ExtendedS3DestinationDescription' in destination:
             info = get_s3info_from_config(destination['ExtendedS3DestinationDescription'])
@@ -117,32 +168,23 @@ def review(stream=None, pattern=None):
             if info:
                 buckets.append(info)
 
-    if len(buckets) < 1:
-        print('Nothing to review, no stream destinations have S3 backups enabled.')
-        sys.exit(1)
-
-    elif len(buckets) > 1:
-        print('WARNING: Review is possible, but cannot resubmit to firehose for delivery since there are multiple destinations defined on the stream.')
-        print('Some destinations may have already accepted the records.')
-
-    for destination in buckets:
-        print('Keys in {}'.format(destination['bucket']))
-        bucket = boto_session.resource('s3').Bucket(destination['bucket'])
-        bucketlist = bucket.objects.filter(Prefix=destination['prefix'])
-        for subobj in sorted(bucketlist, key=lambda k: k.last_modified):
-            if pattern:
-                if subobj.key.contains(pattern):
-                    print('  {}'.format(subobj.key))
-            else:
-                print('  {}'.format(subobj.key))
+    return buckets
 
 
 @manager.command
-def show(bucket, key):
+def show(stream, key, year=None, month=None, day=None):
     """
-    Show the contents of a single failure report. Needs complete S3 key as provided by the review command
+    Show the contents of a single failure report. Needs S3 key as provided by the review command
     """
-    print(json.dumps(get_failure_report(bucket, key), indent=4))
+    stream_config = get_firehose_config(stream)
+    try:
+        s3_info = _extract_s3_info(stream_config, es_only=True)[0]
+    except IndexError:
+        print('Cannot resubmit to ES, no ES destination defined in stream config.')
+        sys.exit(1)
+
+    prefix = _build_prefix(s3_info, year=year, month=month, day=day)
+    print(json.dumps(get_failure_report(s3_info['bucket'], '{}{}'.format(prefix, key)), indent=4))
 
 
 def get_failure_report(bucket, key):
@@ -172,29 +214,18 @@ def get_failure_report(bucket, key):
 
 
 @manager.command
-def resubmit_to_es(stream, year, month=None, day=None):
+def resubmit_to_es(stream, year=None, month=None, day=None):
     """
     Resubmit a day of failed records to ElasticSearch
     """
     stream_config = get_firehose_config(stream)
-    s3_info = None
-    for destination in stream_config['Destinations']:
-        if 'ElasticsearchDestinationDescription' in destination:
-            s3_info = get_s3info_from_config(destination['ElasticsearchDestinationDescription'])
-
-    if not s3_info:
+    try:
+        s3_info = _extract_s3_info(stream_config, es_only=True)[0]
+    except IndexError:
         print('Cannot resubmit to ES, no ES destination defined in stream config.')
         sys.exit(1)
 
-    if s3_info['prefix'].endswith('/'):
-        s3_info['prefix'] = s3_info['prefix'][:-1]
-
-    prefix = '{}/elasticsearch-failed/{}'.format(s3_info['prefix'], year)
-    if month:
-        prefix = '{}/{}'.format(prefix, month)
-
-        if day:
-            prefix = '{}/{}'.format(prefix, day)
+    prefix = _build_prefix(s3_info, year=year, month=month, day=day)
 
     print('Prefix: {}'.format(prefix))
 
@@ -234,20 +265,23 @@ def _resubmit_to_es(bucket, key, stream_config):
                 continue
 
             exception_message = failures['rawData'].get('response', {}).get('exception', {}).get('message', {})
-            if exception_message and isinstance(exception_message, dict):
+            if exception_message:
+                if not isinstance(exception_message, str):
+                    failures['rawData']['response']['exception']['raw_message'] = json.dumps(exception_message)
+                else:
+                    failures['rawData']['response']['exception']['raw_message'] = exception_message
 
-                for keyname in exception_message.keys():
-                    if isinstance(exception_message[keyname], list) and len(exception_message[keyname]) == 1:
-                        failures['rawData']['response']['exception']['message'] = exception_message[keyname][0]
+                failures['rawData']['response']['exception'].pop('message')
 
-                    elif isinstance(exception_message[keyname], dict):
-                        for subkeyname in exception_message[keyname].keys():
-                            if isinstance(exception_message[keyname][subkeyname], list) and len(exception_message[keyname][subkeyname]) == 1:
-                                failures['rawData']['response']['exception']['message'] = exception_message[keyname][subkeyname][0]
-                            elif isinstance(exception_message[keyname][subkeyname], str):
-                                failures['rawData']['response']['exception']['message'] = exception_message[keyname][subkeyname]
-                    elif isinstance(exception_message[keyname], str):
-                        failures['rawData']['response']['exception']['message'] = exception_message[keyname]
+
+            request_data = failures['rawData'].get('request', {}).get('data', {})
+            if request_data:
+                if not isinstance(request_data, str):
+                    failures['rawData']['request']['raw_data'] = json.dumps(request_data)
+                else:
+                    failures['rawData']['request']['raw_data'] = request_data
+
+                failures['rawData']['request'].pop('data')
 
             print('Resubmitting document id: {}'.format(failures['esDocumentId']))
             response = es_conn.create(
@@ -262,6 +296,7 @@ def _resubmit_to_es(bucket, key, stream_config):
                 pass
             else:
                 all_resubmitted = False
+                print('An transport error occurred resubmitting the data for {}: {}'.format(failures['esDocumentId'], e))
 
         except Exception as e:
             print('An error occurred resubmitting the data for {}: {}'.format(failures['esDocumentId'], e))
