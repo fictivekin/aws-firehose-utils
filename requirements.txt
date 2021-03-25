@@ -12,7 +12,7 @@ import-string==0.1.0
 jmespath==0.9.3
 manage.py==0.2.10
 python-dateutil==2.7.0
-PyYAML==3.12
+PyYAML==5.4
 requests==2.18.4
 s3transfer==0.1.13
 six==1.11.0
